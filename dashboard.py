@@ -55,7 +55,9 @@ def render(path: str) -> None:
               delta_color="normal" if (age is not None and age < 180) else "inverse")
     s2.metric("Trading state", "HALTED" if halted else "ACTIVE")
     s3.metric("Mode", kv.get("mode", "PAPER"))
-    s4.metric("Watching", f"{len([x for x in kv.get('universe', '').split(',') if x])} symbols")
+    s4.metric("LLM review", kv.get("llm_status", "unknown").split(" (")[0],
+              help=kv.get("llm_status", "") + " - the LLM can only approve, shrink or reject rule-based signals")
+    st.caption(f"Watching {len([x for x in kv.get('universe', '').split(',') if x])} symbols  |  LLM: {kv.get('llm_status', 'unknown')}")
     if halted:
         st.error(f"Halt reason: {kv.get('halt_reason', '')}  -  resume with `python manage.py resume`")
 

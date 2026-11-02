@@ -62,6 +62,7 @@ class LLMReviewAgent:
     def __init__(self, reviewer: Any, cfg: Config, journal: Journal):
         self.reviewer, self.cfg, self.j = reviewer, cfg, journal
         self._calls: Deque[float] = deque()
+        self.consecutive_failures = 0
 
     def _rate_ok(self) -> bool:
         now = time.time()
@@ -79,8 +80,10 @@ class LLMReviewAgent:
                     self._calls.append(time.time())
                 r: ReviewResult = self.reviewer.review(ctx)
                 v = self._from_result(r)
+                self.consecutive_failures = 0
             except LLMError as exc:
                 log.warning("LLM review failed for %s: %s", sig.symbol, exc)
+                self.consecutive_failures += 1
                 v = self._fail(str(exc)[:200])
         self.j.add_decision(now_iso, sig.symbol, "llm_review", v.decision,
                             {"approved": v.approved, "mult": v.size_multiplier, "source": v.source,

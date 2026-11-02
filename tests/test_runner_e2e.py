@@ -169,3 +169,30 @@ def test_decision_log_and_heartbeat_written(tmp_path):
     kv = bot.j.kv_all()
     assert kv["mode"] == "PAPER" and "last_cycle_wall" in kv
     assert bot.j.equity_curve() and bot.j.get_marks()
+
+
+def test_llm_status_is_recorded_for_dashboard(tmp_path):
+    bot, _ = make_bot(tmp_path)
+    assert bot.j.kv_get("llm_status").startswith("OFF")
+    d2 = tmp_path / "on"
+    d2.mkdir()
+    bot2, _ = make_bot(d2, reviewer=FakeReviewer())
+    assert bot2.j.kv_get("llm_status") == "ON (fake)"
+
+
+def test_repeated_llm_failures_trigger_one_alert(tmp_path):
+    sent = []
+
+    class Rec:
+        def send(self, text, level="info"):
+            sent.append(text)
+            return True
+
+        def entry(self, *a, **k): pass
+        def exit(self, *a, **k): pass
+
+    bot, data = make_bot(tmp_path, reviewer=FakeReviewer(raises=True))
+    bot.notifier = Rec()
+    run(bot, data, 300)
+    assert bot.llm.consecutive_failures >= 3
+    assert sum("failed 3 times" in m for m in sent) == 1

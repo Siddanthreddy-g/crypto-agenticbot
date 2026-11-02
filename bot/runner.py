@@ -20,7 +20,7 @@ from .agents import (LLMReviewAgent, MarketScannerAgent, PerformanceAgent, RiskS
 from .broker import PaperBroker, df_to_candles
 from .config import Config
 from .journal import Journal
-from .llm import make_reviewer
+from .llm import make_reviewer, status_text
 from .notifier import Notifier
 from .risk import RiskGuard, RiskManager
 from .strategy import Signal, StrategyParams
@@ -43,6 +43,8 @@ class Bot:
         self.reviewer = reviewer if reviewer is not None else make_reviewer(cfg)
         self.llm = LLMReviewAgent(self.reviewer, cfg, self.j)
         self.perf = PerformanceAgent(self.j)
+        self.llm_status = status_text(cfg, self.reviewer)
+        self.j.kv_set("llm_status", self.llm_status)
         self.notifier = notifier or Notifier(cfg)
         self.tf_ms = data.timeframe_ms(cfg.timeframe)
         self.marks: Dict[str, float] = {}
@@ -221,6 +223,9 @@ class Bot:
                 sig, df, cfg, self.perf.summary(), list(self.broker.positions),
                 self._benchmark(tickers), ((equity / ds - 1) * 100) if ds else 0.0, now_iso)
         verdict = self.llm.review(sig, ctx or {"symbol": sym}, now_iso)
+        if self.llm.consecutive_failures == 3:
+            self.notifier.send("⚠️ LLM review failed 3 times in a row - check ANTHROPIC_API_KEY / credits / network. "
+                               f"Fail mode is '{cfg.llm_fail_mode}'.", "warn")
         if not verdict.approved:
             self._event(now_iso, sym, "strategy", "SKIPPED_BY_REVIEW", verdict.rationale)
             log.info("SKIP %s (%s): %s", sym, verdict.source, verdict.rationale[:120])
@@ -272,7 +277,7 @@ class Bot:
                     sleep: bool = True) -> None:
         n = 0
         self.notifier.send(f"🤖 Bot started (PAPER) | equity {self.broker.equity(self.marks):.2f} | "
-                           f"LLM {'on' if getattr(self.reviewer, 'model', 'none') != 'none' else 'off'}")
+                           f"LLM {self.llm_status}")
         while not self._stop and (max_cycles is None or n < max_cycles):
             started = time.time()
             try:

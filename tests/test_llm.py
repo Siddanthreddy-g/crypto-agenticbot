@@ -99,3 +99,14 @@ def test_make_reviewer_without_key_is_rules_only(monkeypatch):
     assert isinstance(make_reviewer(Config(llm_enabled=False)), RulesOnlyReviewer)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     assert isinstance(make_reviewer(Config(llm_enabled=True)), AnthropicReviewer)
+
+
+def test_off_reason_and_status_text(monkeypatch):
+    from bot.llm import llm_off_reason, status_text
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert "LLM_ENABLED" in llm_off_reason(Config(llm_enabled=False))
+    assert "ANTHROPIC_API_KEY" in llm_off_reason(Config(llm_enabled=True))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llm_off_reason(Config(llm_enabled=True)) is None
+    assert status_text(Config(), RulesOnlyReviewer()).startswith("OFF")
+    assert status_text(Config(), FakeReviewer()) == "ON (fake)"

@@ -60,17 +60,29 @@ If Binance is blocked in your region (HTTP 451/403), set `EXCHANGE_ID=binanceus`
 2. Create/refresh the token, then put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (never in code).
 3. You get: start/stop, entries, exits, halts, repeated-failure alerts, and a daily summary.
 
-### Enabling the LLM review agent (optional)
+### Using the LLM review agent
+It is on by default in `.env.example` (`LLM_ENABLED=true`) but needs an API key, otherwise the bot runs
+rule-based only and says so at startup and on the dashboard ("LLM review: OFF (reason)").
+
+1. Create an API key at https://console.anthropic.com -> API keys, and make sure the account has credits
+   (a chat subscription is separate from API credits).
+2. `notepad .env` and set `LLM_ENABLED=true` and `ANTHROPIC_API_KEY=...` (never commit `.env`; it is git-ignored).
+3. **Verify it:** `python manage.py llmtest` makes one real review call on live candles and prints the verdict,
+   or a specific hint if the key / credits / model name is wrong.
+4. `python run_bot.py` — the first log lines show `LLM review: ON model=...`.
+
 ```
 LLM_ENABLED=true
 ANTHROPIC_API_KEY=sk-ant-...
 LLM_MODEL=claude-opus-5-5        # or claude-sonnet-5-5 / claude-haiku-5-5 for lower cost
 ```
-It is called only for candidates that already passed the strategy **and** the risk pre-check, at most
-`LLM_MAX_CALLS_PER_HOUR` times. Each call sends ~2–4 KB of numbers (indicators, last 8 candles, benchmark
-regime, portfolio stats) and receives schema-constrained JSON. Every verdict is stored in the
-`decisions` table and visible in the dashboard, so you can measure whether it adds value — if it doesn't,
-leave `LLM_ENABLED=false`; the bot is fully functional without it.
+Role: for every candidate that already passed the strategy **and** the risk pre-check, the LLM gets ~2-4 KB of
+numbers (indicators, last 8 candles, benchmark regime, portfolio stats) and returns schema-constrained JSON:
+**approve / reduce / reject** plus a rationale. It cannot originate trades, enlarge size or change stops/limits.
+Calls are capped at `LLM_MAX_CALLS_PER_HOUR`; a signal is only reviewed when it is already tradeable, so cost is
+roughly cents per day. If the LLM fails 3 times in a row you get a Telegram alert, and (with the default
+`LLM_FAIL_MODE=reject`) trades are skipped rather than taken unreviewed. Every verdict is stored in the
+`decisions` table and shown in the dashboard, so you can measure whether it adds value over the plain rules.
 
 ## Operating it
 
@@ -81,6 +93,7 @@ leave `LLM_ENABLED=false`; the bot is fully functional without it.
 | Flatten everything (paper) and block | `python manage.py killswitch close` |
 | Resume after a halt | `python manage.py killswitch off` then `python manage.py resume` |
 | Write a performance review | `python manage.py review` |
+| Test the LLM key/model with one real call | `python manage.py llmtest` |
 | Run one cycle and exit | `python run_bot.py --once` |
 
 The bot survives restarts: cash and open positions are rebuilt from the trade ledger, and the daily-loss

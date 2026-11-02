@@ -160,12 +160,28 @@ class AnthropicReviewer:
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
 
 
-def make_reviewer(cfg) -> Any:
-    """LLM reviewer if enabled and a key is available, otherwise rules-only."""
+def llm_off_reason(cfg) -> Optional[str]:
+    """None if the LLM reviewer can run, otherwise a human-readable reason it cannot."""
     import os
     if not cfg.llm_enabled:
-        return RulesOnlyReviewer()
+        return "LLM_ENABLED is not true in .env"
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        log.warning("LLM_ENABLED=true but ANTHROPIC_API_KEY is not set -> running rules-only")
+        return "ANTHROPIC_API_KEY is missing in .env"
+    return None
+
+
+def make_reviewer(cfg) -> Any:
+    """LLM reviewer if enabled and a key is available, otherwise rules-only."""
+    why = llm_off_reason(cfg)
+    if why:
+        (log.warning if cfg.llm_enabled else log.info)("LLM review: OFF (%s) -> rule-based signals only", why)
         return RulesOnlyReviewer()
+    log.info("LLM review: ON model=%s fail_mode=%s max_calls/h=%d", cfg.llm_model, cfg.llm_fail_mode,
+             cfg.llm_max_calls_per_hour)
     return AnthropicReviewer(cfg.llm_model)
+
+
+def status_text(cfg, reviewer) -> str:
+    if getattr(reviewer, "model", "none") == "none":
+        return f"OFF ({llm_off_reason(cfg) or 'rules only'})"
+    return f"ON ({reviewer.model})"
