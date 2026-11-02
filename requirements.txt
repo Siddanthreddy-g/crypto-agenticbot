@@ -1,0 +1,8 @@
+ccxt>=4.4.0
+pandas>=2.2.0
+numpy>=1.26
+python-dotenv>=1.0.1
+requests>=2.31
+streamlit>=1.50
+anthropic>=1.0.0
+pytest>=8.0

@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.csv
+KILL_SWITCH
+reports/*.md
