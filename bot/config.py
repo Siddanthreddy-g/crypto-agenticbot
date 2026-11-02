@@ -71,6 +71,15 @@ class Config:
     llm_min_confidence: float = 0.5
     daily_llm_review: bool = True
 
+    # llm scout (LLM proposes extra candidates; code sets stops/sizes/limits)
+    llm_scout_enabled: bool = False
+    llm_scout_model: str = ""              # empty -> same as LLM_MODEL
+    llm_scout_interval_minutes: int = 15
+    llm_scout_min_confidence: float = 0.65
+    llm_scout_size_factor: float = 0.5     # scout trades use at most this fraction of normal size
+    llm_scout_max_trades_per_day: int = 4
+    llm_scout_max_concurrent: int = 1
+
     # telegram
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -144,6 +153,12 @@ class Config:
             raise ValueError("INITIAL_CASH_USDT must be positive")
         if self.scan_interval < 5:
             raise ValueError("SCAN_INTERVAL_SECONDS must be >= 5")
+        rng("llm_scout_size_factor", 0, 1)
+        rng("llm_scout_min_confidence", 0, 1, incl_lo=True)
+        if self.llm_scout_interval_minutes < 5:
+            raise ValueError("LLM_SCOUT_INTERVAL_MINUTES must be >= 5")
+        if self.llm_scout_max_trades_per_day < 0 or self.llm_scout_max_concurrent < 0:
+            raise ValueError("scout caps must be >= 0")
         rng("risk_per_trade", 0, 0.02)
         rng("max_daily_loss", 0, 0.10)
         rng("max_drawdown", 0, 0.30)

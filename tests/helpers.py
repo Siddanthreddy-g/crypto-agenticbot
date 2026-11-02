@@ -65,3 +65,23 @@ class FakeAnthropic:
         if self.exc:
             raise self.exc
         return self.resp
+
+
+class FakeScout(FakeReviewer):
+    """Reviewer that also implements scout(); by default nominates the first symbol that is not held."""
+
+    def __init__(self, conf=0.9, symbols=None, scout_raises=False, **kw):
+        super().__init__(**kw)
+        self.scout_conf, self.scout_symbols, self.scout_raises = conf, symbols, scout_raises
+        self.scout_calls, self.last_snapshot = 0, None
+
+    def scout(self, snapshot):
+        from bot.scout import ScoutCandidate, ScoutResult
+        self.scout_calls += 1
+        self.last_snapshot = snapshot
+        if self.scout_raises:
+            raise LLMError("scout boom")
+        free = [r["symbol"] for r in snapshot["universe"] if not r["already_held"]]
+        picks = self.scout_symbols if self.scout_symbols is not None else free[:1]
+        return ScoutResult("fake view", [ScoutCandidate(s, "breakout", self.scout_conf, "fake thesis", ["r1"])
+                                         for s in picks], [], "fake")

@@ -69,7 +69,7 @@ class PaperBroker:
     # ------------------------------------------------------------------ entry
     def enter_long(self, symbol: str, qty: float, reference_price: float, stop_pct: float,
                    target_pct: float, reason: str, now_iso: str, entry_candle_ts: int,
-                   meta: Optional[Dict[str, Any]] = None) -> Optional[Position]:
+                   meta: Optional[Dict[str, Any]] = None, source: str = "rules") -> Optional[Position]:
         if symbol in self.positions or qty <= 0 or reference_price <= 0:
             return None
         fill = reference_price * (1 + self.slippage_rate)
@@ -86,7 +86,7 @@ class PaperBroker:
         tid = self.journal.add_trade({
             "symbol": symbol, "entry_time": now_iso, "qty": qty, "entry_price": fill,
             "stop_price": stop, "target_price": target, "entry_fee": fee,
-            "entry_candle_ts": entry_candle_ts, "signal_reason": reason, "meta": meta})
+            "entry_candle_ts": entry_candle_ts, "signal_reason": reason, "meta": meta, "source": source})
         self.cash -= total
         pos = Position(tid, symbol, qty, fill, stop, target, fee, now_iso, entry_candle_ts)
         self.positions[symbol] = pos

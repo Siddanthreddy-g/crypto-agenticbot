@@ -28,6 +28,7 @@ An autonomous intraday crypto trading bot that runs **24/7 with no human in the 
 |---|---|---|
 | Market Scanner | deterministic | picks liquid USDT spot pairs (no stables / leveraged tokens) |
 | Strategy Analyst | deterministic | proposes a long signal on the last **closed** candle |
+| **LLM Scout** (optional) | LLM | **nominates** extra long candidates only; code sets stops/size and enforces every limit |
 | **LLM Review Agent** | LLM, optional | **approve / reduce / reject only.** Cannot create trades, enlarge size, move stops, or touch limits |
 | Risk Supervisor + Guard | deterministic | **final say.** Sizing, exposure cap, daily-loss lock, drawdown halt, loss-streak pause, cooldowns, kill switch |
 | Paper Broker | deterministic | simulated fills, stops, targets, time stop |
@@ -84,6 +85,38 @@ roughly cents per day. If the LLM fails 3 times in a row you get a Telegram aler
 `LLM_FAIL_MODE=reject`) trades are skipped rather than taken unreviewed. Every verdict is stored in the
 `decisions` table and shown in the dashboard, so you can measure whether it adds value over the plain rules.
 
+### LLM scout: finding setups the rules miss
+With `LLM_SCOUT_ENABLED=true` (and a working API key) the LLM also **nominates extra long candidates**. Every
+`LLM_SCOUT_INTERVAL_MINUTES` (15 by default), after the rules have had first pick, it receives a compact table for
+the whole universe (price changes, RSI, ATR %, volume ratio, distance to VWAP/EMAs/20-candle high-low, 24 h volume,
+and *why the rules rejected each symbol*) and may return up to 3 candidates with a setup type, confidence and thesis.
+Returning nothing is normal and expected.
+
+What the LLM can and cannot do:
+
+| LLM decides | Code decides (the LLM cannot touch these) |
+|---|---|
+| which symbols look interesting, setup type, confidence, thesis | symbol must be in the live universe, not held, not in cooldown |
+| | stop and target (ATR geometry) and the fee/slippage cost gate |
+| | position size: normal risk sizing x `LLM_SCOUT_SIZE_FACTOR` (0.5) |
+| | min confidence (0.65), max `LLM_SCOUT_MAX_TRADES_PER_DAY` (4), max `LLM_SCOUT_MAX_CONCURRENT` (1) |
+| | all global limits: exposure cap, daily loss, drawdown halt, loss-streak pause, kill switch |
+
+Scout trades are tagged `llm_scout` in the journal; the dashboard has a **Rules vs LLM scout** table and
+`manage.py review` reports both separately. Try it first without trading: `python manage.py llmtest scout`.
+
+**Cost (rough, check your Console usage).** Each scout call is ~3-4 K input tokens plus reasoning/output. Estimated
+at current list prices: ~$0.03-0.05/call on `claude-opus-5-5`, about half on `claude-sonnet-5-5`, a few cents a day
+on `claude-haiku-5-5`. At the 15-minute default that is up to ~$3-5/day on Opus if it runs around the clock, so
+consider `LLM_SCOUT_MODEL=claude-sonnet-5-5` or a 30-60 minute interval. The scout makes no call when it has no
+budget left (daily cap reached, a scout position already open, positions full, bot halted).
+
+**How to judge it - and why it cannot be backtested.** A language model may have seen historical prices in
+training, so replaying history through it would leak the future and flatter the result. The only valid test is
+forward paper trading: let it run for weeks, then compare the `llm_scout` row against `rules` after **50+ scout
+trades** of its own. If it does not beat the plain rules after costs (including its API bill), switch it off with
+`LLM_SCOUT_ENABLED=false`. It is an experiment, not a promise of edge.
+
 ## Operating it
 
 | Task | Command |
@@ -94,6 +127,7 @@ roughly cents per day. If the LLM fails 3 times in a row you get a Telegram aler
 | Resume after a halt | `python manage.py killswitch off` then `python manage.py resume` |
 | Write a performance review | `python manage.py review` |
 | Test the LLM key/model with one real call | `python manage.py llmtest` |
+| See what the scout would nominate (no trade) | `python manage.py llmtest scout` |
 | Run one cycle and exit | `python run_bot.py --once` |
 
 The bot survives restarts: cash and open positions are rebuilt from the trade ledger, and the daily-loss

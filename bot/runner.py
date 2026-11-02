@@ -12,18 +12,20 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .agents import (LLMReviewAgent, MarketScannerAgent, PerformanceAgent, RiskSupervisorAgent,
+from .agents import (LLMReviewAgent, Verdict, MarketScannerAgent, PerformanceAgent, RiskSupervisorAgent,
                      StrategyAnalystAgent, build_review_context)
 from .broker import PaperBroker, df_to_candles
 from .config import Config
 from .journal import Journal
-from .llm import make_reviewer, status_text
+from .indicators import enrich
+from .llm import LLMError, make_reviewer, status_text
 from .notifier import Notifier
 from .risk import RiskGuard, RiskManager
-from .strategy import Signal, StrategyParams
+from .scout import build_snapshot
+from .strategy import MIN_CANDLES, Signal, StrategyParams, risk_geometry, ts_ms
 
 log = logging.getLogger("bot.runner")
 
@@ -51,6 +53,7 @@ class Bot:
         self.seen: Dict[str, int] = {}
         self._last_block: Optional[str] = None
         self._consec_errors = 0
+        self.scout_failures = 0
         self._stop = False
         log.info("Recovered paper portfolio: cash=%.4f open=%d realized=%.4f closed=%d",
                  self.broker.cash, len(self.broker.positions), self.broker.realized_pnl,
@@ -86,7 +89,7 @@ class Bot:
         tickers = self.data.tickers()
         universe = self.scanner.run(tickers)
         held = list(self.broker.positions)
-        summary = {"exits": 0, "entries": 0, "signals": 0, "blocked": None}
+        summary = {"exits": 0, "entries": 0, "scout_entries": 0, "signals": 0, "blocked": None}
 
         # ---- 1. exits
         for sym in held:
@@ -153,6 +156,10 @@ class Bot:
                     break
                 if self._try_enter(sig, df, tickers, now, now_iso):
                     summary["entries"] += 1
+            try:                                     # LLM scout: extra candidates, after the rules had first pick
+                summary["scout_entries"] = self._run_scout(universe, tickers, now, now_iso, now_ms)
+            except Exception as exc:
+                log.warning("scout step failed: %s", exc)
 
         # ---- 5. snapshot / heartbeat
         equity = self.broker.equity(self.marks)
@@ -205,11 +212,7 @@ class Bot:
         cfg, sym = self.cfg, sig.symbol
         ref = tickers.get(sym, {}).get("last") or sig.price
         equity = self.broker.equity(self.marks)
-        sizing = dict(equity=equity, cash=self.broker.cash, entry_price=ref * (1 + cfg.slippage_rate),
-                      stop_pct=sig.stop_pct, open_positions=len(self.broker.positions),
-                      open_notional=self.broker.open_notional(self.marks),
-                      round_qty=lambda q: self.data.round_qty(sym, q),
-                      min_notional=self.data.min_notional(sym))
+        sizing = self._sizing(sym, ref, sig.stop_pct)
 
         pre = self.risk.size(**sizing)                              # cheap pre-check before paying for LLM
         if not pre.approved:
@@ -235,20 +238,139 @@ class Bot:
         if not final.approved:
             self._event(now_iso, sym, "risk", "VETO", final.reason)
             return False
-        pos = self.broker.enter_long(sym, final.qty, ref, sig.stop_pct, sig.target_pct, sig.reason,
-                                     now_iso, sig.candle_ts,
-                                     meta={"score": sig.score, "indicators": sig.indicators,
-                                           "review": verdict.__dict__})
+        return self._execute_entry(sig, ref, final.qty, verdict, "rules", now_iso,
+                                   {"score": sig.score, "indicators": sig.indicators, "review": verdict.__dict__})
+
+    def _sizing(self, sym: str, ref: float, stop_pct: float) -> Dict[str, Any]:
+        return dict(equity=self.broker.equity(self.marks), cash=self.broker.cash,
+                    entry_price=ref * (1 + self.cfg.slippage_rate), stop_pct=stop_pct,
+                    open_positions=len(self.broker.positions),
+                    open_notional=self.broker.open_notional(self.marks),
+                    round_qty=lambda q: self.data.round_qty(sym, q), min_notional=self.data.min_notional(sym))
+
+    def _execute_entry(self, sig: Signal, ref: float, qty: float, verdict: Verdict, source: str,
+                       now_iso: str, meta: Dict[str, Any]) -> bool:
+        sym = sig.symbol
+        pos = self.broker.enter_long(sym, qty, ref, sig.stop_pct, sig.target_pct, sig.reason,
+                                     now_iso, sig.candle_ts, meta=meta, source=source)
         if not pos:
             self._event(now_iso, sym, "broker", "REJECTED", "insufficient cash or invalid qty")
             return False
         self._event(now_iso, sym, "broker", "BUY", {"qty": pos.qty, "price": pos.entry_price,
-                                                    "stop": pos.stop_price, "target": pos.target_price})
+                                                    "stop": pos.stop_price, "target": pos.target_price,
+                                                    "source": source})
         self.marks[sym] = ref
-        log.info("PAPER BUY %s qty=%.6f @ %.6g stop=%.6g target=%.6g", sym, pos.qty, pos.entry_price,
-                 pos.stop_price, pos.target_price)
+        log.info("PAPER BUY [%s] %s qty=%.6f @ %.6g stop=%.6g target=%.6g", source, sym, pos.qty,
+                 pos.entry_price, pos.stop_price, pos.target_price)
         self.notifier.entry(sym, pos, sig.reason, verdict)
         return True
+
+    # ------------------------------------------------------------- LLM scout
+    def _scout_due(self, now: datetime) -> bool:
+        last = self.j.kv_get("last_scout", "")
+        if last:
+            try:
+                return now >= datetime.fromisoformat(last) + timedelta(minutes=self.cfg.llm_scout_interval_minutes)
+            except ValueError:
+                return True
+        return True
+
+    def _run_scout(self, universe: List[str], tickers: Dict[str, Dict[str, float]], now: datetime,
+                   now_iso: str, now_ms: int) -> int:
+        cfg = self.cfg
+        if not cfg.llm_scout_enabled or getattr(self.reviewer, "model", "none") == "none":
+            return 0
+        if len(self.broker.positions) >= cfg.max_open_positions:
+            return 0
+        day = now.astimezone(timezone.utc).date().isoformat()
+        n_today = self.j.count_trades(source="llm_scout", since_iso=day)
+        n_open = self.j.count_trades(source="llm_scout", status="OPEN")
+        if n_today >= cfg.llm_scout_max_trades_per_day or n_open >= cfg.llm_scout_max_concurrent:
+            return 0
+        if not self._scout_due(now):
+            return 0
+        self.j.kv_set("last_scout", now.isoformat())      # stamped BEFORE the call: a failing API is not hammered
+
+        frames: Dict[str, Any] = {}
+        for sym in universe:
+            try:
+                df = self.data.candles(sym, cfg.timeframe, cfg.candle_limit)
+            except Exception as exc:
+                log.debug("scout: no candles for %s: %s", sym, exc)
+                continue
+            if df is None or len(df) < MIN_CANDLES:
+                continue
+            if now_ms - (ts_ms(df["timestamp"].iloc[-1]) + self.tf_ms) > 2 * self.tf_ms:
+                continue                                    # stale -> excluded from what the LLM sees
+            frames[sym] = df
+        if len(frames) < 3:
+            return 0
+        equity = self.broker.equity(self.marks)
+        ds = self.guard.day_start_equity
+        snapshot = build_snapshot(frames, tickers, cfg, self.params, list(self.broker.positions),
+                                  self.perf.summary(), ((equity / ds - 1) * 100) if ds else 0.0, now_iso)
+        try:
+            res = self.reviewer.scout(snapshot)
+        except LLMError as exc:
+            self.scout_failures += 1
+            log.warning("LLM scout failed (%d in a row): %s", self.scout_failures, exc)
+            self._event(now_iso, None, "llm_scout", "SCAN_FAILED", str(exc)[:200])
+            if self.scout_failures == 3:
+                self.notifier.send("⚠️ LLM scout failed 3 times in a row - check ANTHROPIC_API_KEY / credits / model.", "warn")
+            return 0
+        self.scout_failures = 0
+        self._event(now_iso, None, "llm_scout", "SCAN",
+                    {"market_view": res.market_view, "proposed": [(c.symbol, round(c.confidence, 2)) for c in res.candidates],
+                     "dropped": res.dropped, "model": res.model})
+        log.info("LLM scout: %d proposal(s) | %s", len(res.candidates), res.market_view[:140])
+        entered = 0
+        for cand in res.candidates:
+            if (n_today + entered >= cfg.llm_scout_max_trades_per_day
+                    or n_open + entered >= cfg.llm_scout_max_concurrent
+                    or len(self.broker.positions) >= cfg.max_open_positions):
+                break
+            if cand.confidence < cfg.llm_scout_min_confidence:
+                self._event(now_iso, cand.symbol, "llm_scout", "REJECTED",
+                            f"low_confidence({cand.confidence:.2f}<{cfg.llm_scout_min_confidence:.2f})")
+                continue
+            entered += bool(self._enter_scout(cand, frames, tickers, now, now_iso))
+        return entered
+
+    def _enter_scout(self, cand: Any, frames: Dict[str, Any], tickers: Dict[str, Dict[str, float]],
+                     now: datetime, now_iso: str) -> bool:
+        cfg, sym = self.cfg, cand.symbol
+
+        def reject(why: str) -> bool:
+            self._event(now_iso, sym, "llm_scout", "REJECTED", why)
+            log.info("SCOUT reject %s: %s", sym, why)
+            return False
+
+        if sym in self.broker.positions:
+            return reject("already_held")
+        blocked = self.guard.blocked_reason(now, self.broker.equity(self.marks), sym)
+        if blocked:
+            return reject(blocked)
+        df = frames.get(sym)
+        if df is None:
+            return reject("no_fresh_data")
+        r = enrich(df).iloc[-1]
+        close, atr = float(r["close"]), float(r["atr"])
+        if not (close > 0 and atr == atr and atr > 0):
+            return reject("indicators_not_ready")
+        stop_pct, target_pct, net_rr, bad = risk_geometry(close, atr, self.params)   # code, never the LLM, sets levels
+        if bad:
+            return reject("geometry:" + bad)
+        ref = tickers.get(sym, {}).get("last") or close
+        d = self.risk.size(**{**self._sizing(sym, ref, stop_pct), "size_multiplier": cfg.llm_scout_size_factor})
+        if not d.approved:
+            return reject("risk:" + d.reason)
+        reason = f"LLM scout [{cand.setup_type}] conf {cand.confidence:.2f}: {cand.thesis}"[:300]
+        sig = Signal(sym, ts_ms(r["timestamp"]), close, True, reason, score=cand.confidence, atr=atr,
+                     stop_pct=stop_pct, target_pct=target_pct, indicators={"net_rr": net_rr, "atr": atr})
+        verdict = Verdict(True, cfg.llm_scout_size_factor, cand.thesis, "llm_scout", "scout_propose")
+        return self._execute_entry(sig, ref, d.qty, verdict, "llm_scout", now_iso,
+                                   {"scout": {"setup": cand.setup_type, "confidence": cand.confidence,
+                                              "thesis": cand.thesis, "risks": cand.key_risks}})
 
     # ------------------------------------------------------------------ close
     def _on_close(self, closed: Dict[str, Any], now: datetime) -> None:

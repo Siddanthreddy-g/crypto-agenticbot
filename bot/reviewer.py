@@ -19,6 +19,10 @@ def collect_stats(j: Journal) -> Dict[str, Any]:
     for t in closed:
         by_reason[t["reason"]].append(t["pnl"] or 0)
         by_symbol[t["symbol"]].append(t["pnl"] or 0)
+    by_source = defaultdict(list)
+    for t in closed:
+        by_source[t.get("source") or "rules"].append(t["pnl"] or 0)
+    out["by_source"] = {k: trade_stats(v) for k, v in by_source.items()}
     out["by_exit_reason"] = {k: trade_stats(v) for k, v in by_reason.items()}
     out["by_symbol"] = {k: trade_stats(v) for k, v in by_symbol.items()}
     out["max_drawdown_pct"] = max_drawdown_pct([r["equity"] for r in j.equity_curve(50000)])
@@ -38,7 +42,9 @@ def build_report(j: Journal, reviewer: Optional[Any] = None, out_dir: str = "rep
     lines = [f"# Post-trade review - {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC", "",
              "_Paper trading. Informational only; nothing here is applied automatically._", "",
              "## Overall", _fmt(st["overall"]) + f" | max drawdown {st['max_drawdown_pct']:.2f}%", "",
-             "## By exit reason"]
+             "## By source (rules vs LLM scout)"]
+    lines += [f"- **{k}**: {_fmt(v)}" for k, v in st["by_source"].items()] or ["- (no closed trades)"]
+    lines += ["", "## By exit reason"]
     lines += [f"- **{k}**: {_fmt(v)}" for k, v in st["by_exit_reason"].items()] or ["- (no closed trades)"]
     lines += ["", "## By symbol"]
     lines += [f"- **{k}**: {_fmt(v)}" for k, v in st["by_symbol"].items()] or ["- (no closed trades)"]

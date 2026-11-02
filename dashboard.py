@@ -111,6 +111,16 @@ def render(path: str) -> None:
         else:
             st.info("No closed trades yet.")
     with right:
+        st.subheader("Rules vs LLM scout")
+        if closed:
+            cdf2 = pd.DataFrame(closed)
+            cdf2["source"] = cdf2["source"].fillna("rules")
+            g2 = cdf2.groupby("source")["pnl"].agg(trades="count", total_pnl="sum", avg_pnl="mean",
+                                                   win_rate=lambda s: (s > 0).mean() * 100).round(4)
+            st.dataframe(g2, width="stretch")
+            st.caption("Judge the LLM scout only after 50+ trades of its own - small samples are noise.")
+        else:
+            st.info("No closed trades yet.")
         st.subheader("PnL by exit reason")
         if closed:
             g = pd.DataFrame(closed).groupby("reason")["pnl"].agg(["count", "sum", "mean"]).round(4)

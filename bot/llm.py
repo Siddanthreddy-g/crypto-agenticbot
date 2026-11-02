@@ -16,6 +16,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .scout import SCOUT_SCHEMA, SCOUT_SYSTEM, ScoutResult, normalize_scout
+
 log = logging.getLogger("bot.llm")
 
 REVIEW_SCHEMA = {
@@ -110,10 +112,15 @@ class RulesOnlyReviewer:
     def narrate(self, stats: Dict[str, Any]) -> str:
         return "_LLM disabled - no narrative review._"
 
+    def scout(self, snapshot: Dict[str, Any]) -> ScoutResult:
+        return ScoutResult()
+
 
 class AnthropicReviewer:
-    def __init__(self, model: str = "claude-opus-5-5", client: Any = None, timeout: float = 45.0):
+    def __init__(self, model: str = "claude-opus-5-5", client: Any = None, timeout: float = 60.0,
+                 scout_model: Optional[str] = None):
         self.model = model
+        self.scout_model = scout_model or model
         if client is None:
             import anthropic  # lazy: tests / rules-only mode need no SDK
             client = anthropic.Anthropic(timeout=timeout, max_retries=1)
@@ -145,6 +152,22 @@ class AnthropicReviewer:
         except Exception as exc:                 # network, API, JSON, auth ...
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
         return normalize(raw, self.model)
+
+    def scout(self, snapshot: Dict[str, Any]) -> ScoutResult:
+        """Nominate extra long candidates. Output is validated against the live universe."""
+        universe = [r["symbol"] for r in snapshot.get("universe", [])]
+        try:
+            resp = self.client.messages.create(
+                model=self.scout_model, max_tokens=6000, system=SCOUT_SYSTEM,
+                messages=[{"role": "user", "content": json.dumps(snapshot, default=str)}],
+                output_config={"effort": "medium",
+                               "format": {"type": "json_schema", "schema": SCOUT_SCHEMA}},
+            )
+            return normalize_scout(json.loads(self._text(resp)), universe, self.scout_model)
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"{type(exc).__name__}: {exc}") from exc
 
     def narrate(self, stats: Dict[str, Any]) -> str:
         try:
@@ -178,10 +201,11 @@ def make_reviewer(cfg) -> Any:
         return RulesOnlyReviewer()
     log.info("LLM review: ON model=%s fail_mode=%s max_calls/h=%d", cfg.llm_model, cfg.llm_fail_mode,
              cfg.llm_max_calls_per_hour)
-    return AnthropicReviewer(cfg.llm_model)
+    return AnthropicReviewer(cfg.llm_model, scout_model=cfg.llm_scout_model or None)
 
 
 def status_text(cfg, reviewer) -> str:
     if getattr(reviewer, "model", "none") == "none":
         return f"OFF ({llm_off_reason(cfg) or 'rules only'})"
-    return f"ON ({reviewer.model})"
+    scout = f", scout {getattr(reviewer, 'scout_model', reviewer.model)}" if cfg.llm_scout_enabled else ""
+    return f"ON ({reviewer.model}{scout})"

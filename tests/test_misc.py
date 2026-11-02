@@ -55,3 +55,20 @@ def test_dashboard_renders_on_demo_db(tmp_path, monkeypatch):
     assert not at.exception
     labels = [m.label for m in at.metric]
     assert "Equity (USDT)" in labels and "Max drawdown" in labels
+
+
+def test_dashboard_and_report_split_rules_vs_scout(tmp_path, monkeypatch):
+    import os
+    from streamlit.testing.v1 import AppTest
+    from bot.reviewer import build_report, collect_stats
+    from .helpers import FakeScout, make_bot, run
+    bot, data = make_bot(tmp_path, reviewer=FakeScout(), llm_scout_enabled=True)
+    run(bot, data, 250)
+    st = collect_stats(bot.j)
+    assert "llm_scout" in st["by_source"] or "rules" in st["by_source"]
+    assert "llm scout" in open(build_report(bot.j, None, out_dir=str(tmp_path / "rep"))).read().lower()
+    monkeypatch.setenv("DATABASE_PATH", bot.cfg.database_path)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    at = AppTest.from_file(os.path.join(root, "dashboard.py"), default_timeout=60).run()
+    assert not at.exception
+    assert "Rules vs LLM scout" in [s.value for s in at.subheader]

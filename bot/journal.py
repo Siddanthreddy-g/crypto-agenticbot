@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS trades (
     reason TEXT,
     entry_candle_ts INTEGER NOT NULL DEFAULT 0,
     signal_reason TEXT,
-    meta TEXT
+    meta TEXT,
+    source TEXT NOT NULL DEFAULT 'rules'
 );
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +70,9 @@ class Journal:
                 self.con.execute("PRAGMA journal_mode=WAL")
                 self.con.execute("PRAGMA synchronous=NORMAL")
             self.con.executescript(SCHEMA)
+            cols = {r[1] for r in self.con.execute("PRAGMA table_info(trades)").fetchall()}
+            if "source" not in cols:                       # migrate databases created before LLM-scout
+                self.con.execute("ALTER TABLE trades ADD COLUMN source TEXT NOT NULL DEFAULT 'rules'")
             self.con.commit()
         self.con.execute("PRAGMA busy_timeout=5000")
         self.con.row_factory = sqlite3.Row
@@ -151,11 +155,12 @@ class Journal:
     def add_trade(self, v: Dict[str, Any]) -> int:
         cur = self._exec(
             """INSERT INTO trades (symbol, entry_time, qty, entry_price, stop_price, target_price,
-               entry_fee, status, reason, entry_candle_ts, signal_reason, meta)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, ?, ?, ?)""",
+               entry_fee, status, reason, entry_candle_ts, signal_reason, meta, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, ?, ?, ?, ?)""",
             (v["symbol"], v["entry_time"], v["qty"], v["entry_price"], v["stop_price"],
              v["target_price"], v["entry_fee"], int(v.get("entry_candle_ts", 0)),
-             v.get("signal_reason"), json.dumps(v.get("meta") or {}, default=str)))
+             v.get("signal_reason"), json.dumps(v.get("meta") or {}, default=str),
+             v.get("source", "rules")))
         return int(cur.lastrowid)
 
     def close_trade(self, trade_id: int, exit_time: str, exit_price: float, exit_fee: float,
@@ -166,6 +171,15 @@ class Journal:
             (exit_time, exit_price, exit_fee, pnl, reason, trade_id))
         if cur.rowcount != 1:
             raise ValueError(f"Trade {trade_id} was not found as an open trade.")
+
+    def count_trades(self, source: Optional[str] = None, status: Optional[str] = None,
+                     since_iso: Optional[str] = None) -> int:
+        q, args = "SELECT COUNT(*) AS n FROM trades WHERE 1=1", []
+        for col, val, op in (("source", source, "="), ("status", status, "="), ("entry_time", since_iso, ">=")):
+            if val is not None:
+                q += f" AND {col} {op} ?"
+                args.append(val)
+        return int(self._all(q, tuple(args))[0]["n"])
 
     def get_open_trades(self) -> List[Dict[str, Any]]:
         return self._all("SELECT * FROM trades WHERE status='OPEN' ORDER BY id")

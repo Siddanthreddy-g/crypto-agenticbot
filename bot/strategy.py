@@ -63,6 +63,20 @@ class Signal:
     indicators: Dict[str, float] = field(default_factory=dict)
 
 
+def risk_geometry(close: float, atr: float, p: StrategyParams):
+    """ATR-based stop/target with the fee+slippage cost gate.
+    Returns (stop_pct, target_pct, net_rr, reject_reason_or_None). Shared by rules and LLM-scout trades."""
+    stop_pct = min(max(p.atr_stop_mult * atr / close, p.min_stop_pct), p.max_stop_pct)
+    target_pct = stop_pct * p.reward_risk
+    cost = p.round_trip_cost()
+    if cost / target_pct > p.max_cost_to_target:
+        return stop_pct, target_pct, 0.0, f"costs_too_high:{cost / target_pct:.2f}"
+    net_rr = (target_pct - cost) / (stop_pct + cost)
+    if net_rr < p.min_net_rr:
+        return stop_pct, target_pct, net_rr, f"net_rr_too_low:{net_rr:.2f}"
+    return stop_pct, target_pct, net_rr, None
+
+
 def _bad(*vals) -> bool:
     return any(v is None or (isinstance(v, float) and math.isnan(v)) for v in vals)
 
@@ -91,18 +105,11 @@ def signal_from_values(symbol: str, candle_ts: int, close: float, ema_fast: floa
         return Signal(symbol, candle_ts, close, False, "filters_not_met:" + ",".join(failed),
                       atr=atr, indicators=ind)
 
-    stop_pct = min(max(p.atr_stop_mult * atr / close, p.min_stop_pct), p.max_stop_pct)
-    target_pct = stop_pct * p.reward_risk
-    cost = p.round_trip_cost()
-    if cost / target_pct > p.max_cost_to_target:
-        return Signal(symbol, candle_ts, close, False,
-                      f"costs_too_high:{cost / target_pct:.2f}", atr=atr, stop_pct=stop_pct,
-                      target_pct=target_pct, indicators=ind)
-    net_rr = (target_pct - cost) / (stop_pct + cost)
+    stop_pct, target_pct, net_rr, bad_geo = risk_geometry(close, atr, p)
     ind["net_rr"] = net_rr
-    if net_rr < p.min_net_rr:
-        return Signal(symbol, candle_ts, close, False, f"net_rr_too_low:{net_rr:.2f}",
-                      atr=atr, stop_pct=stop_pct, target_pct=target_pct, indicators=ind)
+    if bad_geo:
+        return Signal(symbol, candle_ts, close, False, bad_geo, atr=atr, stop_pct=stop_pct,
+                      target_pct=target_pct, indicators=ind)
 
     trend_strength = (ema_fast / ema_slow - 1.0) * 100.0
     score = min(vol_ratio, 5.0) + max(trend_strength, 0.0) * 5.0

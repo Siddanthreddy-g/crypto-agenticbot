@@ -38,8 +38,9 @@ class Notifier:
 
     # ---- formatted helpers
     def entry(self, sym: str, pos: Any, reason: str, verdict: Any) -> None:
+        icon = "🔎" if getattr(verdict, "source", "") == "llm_scout" else "🟢"
         self.send(
-            f"🟢 PAPER BUY {sym}\nqty {pos.qty:.6f} @ {pos.entry_price:.6g}\n"
+            f"{icon} PAPER BUY {sym}{' (LLM scout)' if icon == '🔎' else ''}\nqty {pos.qty:.6f} @ {pos.entry_price:.6g}\n"
             f"stop {pos.stop_price:.6g} | target {pos.target_price:.6g}\n"
             f"why: {reason}\nreview: {verdict.source}/{verdict.decision} "
             f"(x{verdict.size_multiplier:.2f}) {verdict.rationale[:200]}")

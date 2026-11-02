@@ -6,6 +6,7 @@
     python manage.py resume                # clear halt / loss-streak pause
     python manage.py review                # write reports/review-*.md (LLM narrative if enabled)
     python manage.py llmtest               # ONE real LLM review call on live data - verifies key / model / credits
+    python manage.py llmtest scout         # ONE real scout call: shows what the LLM would nominate (no trade placed)
     python manage.py killswitch [close]    # create KILL_SWITCH file (optionally: close all positions)
     python manage.py killswitch off        # remove KILL_SWITCH file
 """
@@ -17,6 +18,47 @@ from datetime import datetime, timezone
 from bot.config import Config
 from bot.journal import Journal
 from bot.risk import RiskGuard
+
+
+def llm_test_scout(cfg) -> int:
+    """One real scout call over the live universe. Prints nominations; never trades."""
+    import time
+    from bot.llm import AnthropicReviewer, LLMError, llm_off_reason
+    from bot.scout import build_snapshot
+    from bot.strategy import StrategyParams
+
+    why = llm_off_reason(cfg)
+    if why:
+        print(f"LLM is OFF: {why}. Fix .env first (see: python manage.py llmtest).")
+        return 1
+    try:
+        from bot.market_data import ExchangeData
+        data = ExchangeData(cfg.exchange_id, cfg.quote_asset)
+        src = f"live {cfg.exchange_id} data"
+    except Exception as exc:
+        from bot.synthetic import SyntheticData
+        data, src = SyntheticData(timeframe=cfg.timeframe), f"synthetic data (exchange unreachable: {type(exc).__name__})"
+    tk = data.tickers()
+    uni = data.liquid_symbols(cfg.min_quote_volume, cfg.max_symbols, cfg.watchlist, tickers=tk)
+    frames = {s: data.candles(s, cfg.timeframe, cfg.candle_limit) for s in uni}
+    snap = build_snapshot(frames, tk, cfg, StrategyParams.from_config(cfg), [], {}, 0.0, data.now().isoformat())
+    model = cfg.llm_scout_model or cfg.llm_model
+    print(f"Calling scout ({model}) over {len(snap['universe'])} symbols using {src}. No trade will be placed...")
+    t0 = time.time()
+    try:
+        res = AnthropicReviewer(cfg.llm_model, scout_model=cfg.llm_scout_model or None).scout(snap)
+    except LLMError as exc:
+        print(f"\nFAILED: {exc}")
+        return 2
+    print(f"\nOK in {time.time() - t0:.1f}s\nmarket view: {res.market_view}")
+    if not res.candidates:
+        print("candidates : none (standing aside is a normal answer)")
+    for c in res.candidates:
+        act = "WOULD TRADE" if c.confidence >= cfg.llm_scout_min_confidence else "below threshold"
+        print(f"  {c.symbol:<10} {c.setup_type:<24} conf {c.confidence:.2f} [{act}]\n    thesis: {c.thesis}\n    risks : {'; '.join(c.key_risks)}")
+    if res.dropped:
+        print("discarded  :", res.dropped)
+    return 0
 
 
 def llm_test(cfg) -> int:
@@ -81,7 +123,7 @@ def main() -> int:
     if a.db:
         cfg = cfg.replace(database_path=a.db)
     if a.cmd == "llmtest":
-        return llm_test(cfg)
+        return llm_test_scout(cfg) if a.arg == "scout" else llm_test(cfg)
     if not os.path.exists(cfg.database_path) and a.cmd != "killswitch":
         print(f"No database at {cfg.database_path} - start the bot first.")
         return 1
