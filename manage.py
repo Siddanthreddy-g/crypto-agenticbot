@@ -23,7 +23,7 @@ from bot.risk import RiskGuard
 def llm_test_scout(cfg) -> int:
     """One real scout call over the live universe. Prints nominations; never trades."""
     import time
-    from bot.llm import AnthropicReviewer, LLMError, llm_off_reason
+    from bot.llm import LLMError, llm_off_reason, make_reviewer
     from bot.scout import build_snapshot
     from bot.strategy import StrategyParams
 
@@ -46,7 +46,7 @@ def llm_test_scout(cfg) -> int:
     print(f"Calling scout ({model}) over {len(snap['universe'])} symbols using {src}. No trade will be placed...")
     t0 = time.time()
     try:
-        res = AnthropicReviewer(cfg.llm_model, scout_model=cfg.llm_scout_model or None).scout(snap)
+        res = make_reviewer(cfg).scout(snap)
     except LLMError as exc:
         print(f"\nFAILED: {exc}")
         return 2
@@ -65,13 +65,13 @@ def llm_test(cfg) -> int:
     """Make one real review call on the most liquid symbol's current candles (no trade is placed)."""
     import time
     from bot.agents import build_review_context
-    from bot.llm import AnthropicReviewer, LLMError, llm_off_reason
+    from bot.llm import LLMError, llm_off_reason, make_reviewer
     from bot.strategy import StrategyParams, evaluate
 
     why = llm_off_reason(cfg)
     if why:
-        print(f"LLM review is OFF: {why}.\n\nTo enable, edit .env (notepad .env) and set:\n"
-              "  LLM_ENABLED=true\n  ANTHROPIC_API_KEY=<your key from console.anthropic.com>\nthen run this again.")
+        print(f"LLM review is OFF: {why}.\n\nTo enable, edit .env (notepad .env). Free options (Ollama / Groq / Gemini) "
+              "and paid Anthropic are described in the README section 'Using the LLM'.\nThen run this again.")
         return 1
     try:
         from bot.market_data import ExchangeData
@@ -89,7 +89,7 @@ def llm_test(cfg) -> int:
           f"{'BUY' if sig.should_buy else 'NOT a buy: ' + sig.reason}; this is only a connectivity test)...")
     t0 = time.time()
     try:
-        r = AnthropicReviewer(cfg.llm_model).review(ctx)
+        r = make_reviewer(cfg).review(ctx)
     except LLMError as exc:
         msg = str(exc)
         print(f"\nFAILED: {msg}")
@@ -99,7 +99,9 @@ def llm_test(cfg) -> int:
                  "404": f"Model name not found: check LLM_MODEL (now '{cfg.llm_model}').",
                  "not_found": f"Model name not found: check LLM_MODEL (now '{cfg.llm_model}').",
                  "429": "Rate limited - wait a minute and retry.",
-                 "Connection": "Network problem reaching api.anthropic.com (firewall/VPN/proxy?)."}
+                 "429": "Rate limited (free tiers have per-minute/day caps) - wait a minute and retry.",
+                 "refused": "Cannot reach the LLM server. For Ollama make sure it is running and LLM_BASE_URL is right.",
+                 "Connection": "Cannot reach the LLM server (is Ollama running? firewall/VPN/proxy? check LLM_BASE_URL)."}
         for k, h in hints.items():
             if k.lower() in msg.lower():
                 print("Hint:", h)

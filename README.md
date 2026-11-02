@@ -61,29 +61,87 @@ If Binance is blocked in your region (HTTP 451/403), set `EXCHANGE_ID=binanceus`
 2. Create/refresh the token, then put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (never in code).
 3. You get: start/stop, entries, exits, halts, repeated-failure alerts, and a daily summary.
 
-### Using the LLM review agent
-It is on by default in `.env.example` (`LLM_ENABLED=true`) but needs an API key, otherwise the bot runs
-rule-based only and says so at startup and on the dashboard ("LLM review: OFF (reason)").
+### Using the LLM (free options first)
+**You do not need an LLM, and you do not need to pay for one.** With `LLM_ENABLED=false` (the default) the bot trades
+on its rules alone, for free. If you want the LLM review/scout, pick one of these. Nothing is sent except market
+numbers the bot computed (no keys, no personal data).
 
-1. Create an API key at https://console.anthropic.com -> API keys, and make sure the account has credits
-   (a chat subscription is separate from API credits).
-2. `notepad .env` and set `LLM_ENABLED=true` and `ANTHROPIC_API_KEY=...` (never commit `.env`; it is git-ignored).
-3. **Verify it:** `python manage.py llmtest` makes one real review call on live candles and prints the verdict,
-   or a specific hint if the key / credits / model name is wrong.
-4. `python run_bot.py` — the first log lines show `LLM review: ON model=...`.
+| Option | Cost | Needs | Notes |
+|---|---|---|---|
+| **Ollama** (on your PC) | free, no limits | install Ollama + download a model (several GB, ~8 GB RAM for a 7-8B model) | offline; slow on CPU-only laptops; smaller models are weaker judges |
+| **Groq** free tier | free, no card | account + API key at console.groq.com | rate limits per model/day; faster and stronger than a small local model |
+| **Google Gemini** free tier | free, no card | key from aistudio.google.com | limits are shown in AI Studio; Google may use free-tier content to improve its products |
+| Anthropic API | **paid** | key + credits at console.anthropic.com | strongest, but the only one that costs money |
 
+Free-tier limits and model names change, so check the provider's current pages
+([Google AI Studio](https://aistudio.google.com), [Groq console](https://console.groq.com),
+[Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility)). All three free routes use the same generic
+OpenAI-style connector (`LLM_PROVIDER=openai_compat`), which this project tests against a mock of that protocol
+(not against the live services).
+
+**Option A: Ollama (fully free, offline)**
+1. Install Ollama from https://ollama.com, then in PowerShell: `ollama pull qwen2.5:7b` (or any model from the Ollama library).
+2. Ollama's OpenAI endpoint cannot set the context window per request, and the bot's prompts are a few thousand
+   tokens, so create a model with a bigger window: `notepad Modelfile` with these two lines
+   ```
+   FROM qwen2.5:7b
+   PARAMETER num_ctx 8192
+   ```
+   then `ollama create trader -f Modelfile`.
+3. In `.env`:
+   ```
+   LLM_ENABLED=true
+   LLM_PROVIDER=openai_compat
+   LLM_BASE_URL=http://localhost:11434/v1
+   LLM_MODEL=trader
+   LLM_API_KEY=
+   LLM_TIMEOUT_SECONDS=180
+   ```
+
+**Option B: Groq (free key)**: create a key at console.groq.com, then
 ```
 LLM_ENABLED=true
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.3-70b-versatile
+LLM_API_KEY=your-groq-key
+LLM_MAX_CALLS_PER_HOUR=20
+LLM_SCOUT_INTERVAL_MINUTES=30
+```
+
+**Option C: Gemini (free key)**: create a key in AI Studio, pick a current Flash model name from its model list:
+```
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compat
+LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_MODEL=<model name from AI Studio>
+LLM_API_KEY=your-ai-studio-key
+LLM_SCOUT_INTERVAL_MINUTES=30
+```
+
+**Verify:** `python manage.py llmtest` (one review call) and `python manage.py llmtest scout` (shows nominations,
+places no trade). The first lines of `python run_bot.py` say `LLM review: ON provider=...` or `OFF (reason)`, and the
+dashboard shows the same.
+
+Quality caveat: small or free models are noticeably worse at market judgement and sometimes break the JSON format.
+That cannot hurt the account (invalid output is rejected, failures skip the trade, and all limits live in code), but
+it can make the LLM useless. Judge it from the dashboard's decision log and the "Rules vs LLM scout" table, and turn it
+off if it doesn't help. If an answer is cut off or ignored on Ollama, the context window is too small (step 2).
+
+**Paid option (Anthropic API):**
+```
+LLM_ENABLED=true
+LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 LLM_MODEL=claude-opus-5-5        # or claude-sonnet-5-5 / claude-haiku-5-5 for lower cost
 ```
+
 Role: for every candidate that already passed the strategy **and** the risk pre-check, the LLM gets ~2-4 KB of
-numbers (indicators, last 8 candles, benchmark regime, portfolio stats) and returns schema-constrained JSON:
-**approve / reduce / reject** plus a rationale. It cannot originate trades, enlarge size or change stops/limits.
-Calls are capped at `LLM_MAX_CALLS_PER_HOUR`; a signal is only reviewed when it is already tradeable, so cost is
-roughly cents per day. If the LLM fails 3 times in a row you get a Telegram alert, and (with the default
-`LLM_FAIL_MODE=reject`) trades are skipped rather than taken unreviewed. Every verdict is stored in the
-`decisions` table and shown in the dashboard, so you can measure whether it adds value over the plain rules.
+numbers (indicators, last 8 candles, benchmark regime, portfolio stats) and returns **approve / reduce / reject**
+plus a rationale. It cannot originate trades through this path, enlarge size or change stops/limits.
+Calls are capped at `LLM_MAX_CALLS_PER_HOUR`. If it fails 3 times in a row you get a Telegram alert, and (with the
+default `LLM_FAIL_MODE=reject`) trades are skipped rather than taken unreviewed. Every verdict is stored in the
+`decisions` table and shown in the dashboard.
 
 ### LLM scout: finding setups the rules miss
 With `LLM_SCOUT_ENABLED=true` (and a working API key) the LLM also **nominates extra long candidates**. Every
@@ -105,11 +163,10 @@ What the LLM can and cannot do:
 Scout trades are tagged `llm_scout` in the journal; the dashboard has a **Rules vs LLM scout** table and
 `manage.py review` reports both separately. Try it first without trading: `python manage.py llmtest scout`.
 
-**Cost (rough, check your Console usage).** Each scout call is ~3-4 K input tokens plus reasoning/output. Estimated
-at current list prices: ~$0.03-0.05/call on `claude-opus-5-5`, about half on `claude-sonnet-5-5`, a few cents a day
-on `claude-haiku-5-5`. At the 15-minute default that is up to ~$3-5/day on Opus if it runs around the clock, so
-consider `LLM_SCOUT_MODEL=claude-sonnet-5-5` or a 30-60 minute interval. The scout makes no call when it has no
-budget left (daily cap reached, a scout position already open, positions full, bot halted).
+**Cost.** On the free options above: nothing. (On the paid Anthropic API each scout call is roughly a few cents,
+so use a cheap model and a 30-60 minute interval there.) Free tiers have rate limits, so keep
+`LLM_SCOUT_INTERVAL_MINUTES` at 30 or more. The scout makes no call when it has no budget left (daily cap reached,
+a scout position already open, positions full, bot halted).
 
 **How to judge it - and why it cannot be backtested.** A language model may have seen historical prices in
 training, so replaying history through it would leak the future and flatter the result. The only valid test is

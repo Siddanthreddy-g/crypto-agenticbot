@@ -65,6 +65,10 @@ class Config:
 
     # llm
     llm_enabled: bool = False
+    llm_provider: str = "anthropic"        # anthropic | openai_compat (Ollama / Groq / Gemini / ... free options)
+    llm_base_url: str = ""                 # for openai_compat, e.g. http://localhost:11434/v1
+    llm_api_key: str = ""                  # for openai_compat; not needed for local Ollama
+    llm_timeout_seconds: int = 90
     llm_model: str = "claude-opus-5-5"
     llm_fail_mode: str = "reject"          # reject | approve
     llm_max_calls_per_hour: int = 30
@@ -147,6 +151,10 @@ class Config:
             raise ValueError("Safety lock: this distribution supports TRADING_MODE=paper only.")
         if self.data_source not in {"exchange", "synthetic"}:
             raise ValueError("DATA_SOURCE must be 'exchange' or 'synthetic'")
+        if self.llm_provider not in {"anthropic", "openai_compat"}:
+            raise ValueError("LLM_PROVIDER must be 'anthropic' or 'openai_compat'")
+        if self.llm_timeout_seconds < 5:
+            raise ValueError("LLM_TIMEOUT_SECONDS must be >= 5")
         if self.llm_fail_mode not in {"reject", "approve"}:
             raise ValueError("LLM_FAIL_MODE must be 'reject' or 'approve'")
         if self.initial_cash <= 0:
